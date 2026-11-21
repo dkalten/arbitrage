@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.20)
+project(best_lines CXX)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_executable(best_lines best_lines.cpp)
+if(WIN32)
+    target_link_libraries(best_lines PRIVATE winhttp)
+else()
+    find_package(CURL REQUIRED)
+    find_package(Threads REQUIRED)
+    target_link_libraries(best_lines PRIVATE CURL::libcurl Threads::Threads)
+endif()
+if(MSVC)
+    target_compile_options(best_lines PRIVATE /W4 /utf-8)
+endif()
