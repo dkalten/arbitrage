@@ -19,6 +19,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -170,16 +171,38 @@ double round9(double value) {
     return std::round(value * 1e9) / 1e9;
 }
 
+// The whole of `text` as a number, as std::from_chars reads one. Apple's libc++ lacks
+// from_chars for doubles, so there strtod reads it, held to the same rules.
+std::optional<double> parse_double(std::string_view text) {
+    double value = 0;
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
+    const char* end = text.data() + text.size();
+    auto [parsed_to, error] = std::from_chars(text.data(), end, value);
+    if (error != std::errc{} || parsed_to != end)
+        return std::nullopt;
+#else
+    // from_chars takes no leading space or '+', and no hex without being asked for it.
+    if (text.empty() || std::isspace(static_cast<unsigned char>(text.front())) || text.front() == '+' ||
+        text.find_first_of("xX") != std::string_view::npos)
+        return std::nullopt;
+    std::string copy(text);
+    char* parsed_to = nullptr;
+    errno = 0;
+    value = std::strtod(copy.c_str(), &parsed_to);
+    if (errno == ERANGE || parsed_to != copy.c_str() + copy.size())
+        return std::nullopt;
+#endif
+    return value;
+}
+
 double parse_number(std::string_view text) {
     std::string_view digits = text;
     if (digits.starts_with('+'))
         digits.remove_prefix(1);
-    double value = 0;
-    const char* end = digits.data() + digits.size();
-    auto [parsed_to, error] = std::from_chars(digits.data(), end, value);
-    if (error != std::errc{} || parsed_to != end)
+    std::optional<double> value = parse_double(digits);
+    if (!value)
         throw std::runtime_error(std::format("'{}' is not a number", text));
-    return value;
+    return *value;
 }
 
 class Json {
@@ -1126,13 +1149,15 @@ Json read_polymarket_book(const std::string& slug) {
 std::vector<Json> read_polymarket_books(const std::vector<std::string>& slugs) {
     std::vector<Json> books(slugs.size());
     std::atomic<std::size_t> next = 0;
-    std::vector<std::jthread> readers;
+    // std::thread, not std::jthread: Apple's libc++ only has jthread behind an experimental flag.
+    std::vector<std::thread> readers;
     for (std::size_t reader = 0; reader < std::min(BOOK_READERS, slugs.size()); ++reader)
         readers.emplace_back([&] {
             for (std::size_t index; (index = next++) < slugs.size();)
                 books[index] = read_polymarket_book(slugs[index]);
         });
-    readers.clear();
+    for (std::thread& reader : readers)
+        reader.join();
     return books;
 }
 
@@ -1706,9 +1731,8 @@ std::optional<Wager> ask_wager(BetKind kind) {
 
         bool valid = true;
         auto positive = [&valid](std::string_view word) {
-            double value = 0;
-            auto [end, error] = std::from_chars(word.data(), word.data() + word.size(), value);
-            valid &= error == std::errc{} && end == word.data() + word.size() && std::isfinite(value) && value > 0;
+            double value = parse_double(word).value_or(0);
+            valid &= std::isfinite(value) && value > 0;
             return value;
         };
         double boost = boosted ? PROFIT_BOOST : 0;
